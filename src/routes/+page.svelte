@@ -1,101 +1,161 @@
 <script lang="ts">
-	let iframe: HTMLIFrameElement
-	let pregledaj: boolean
-	let slika: HTMLInputElement
-	let imageurl: string
-	let naslov: string
-	let yt: string
+	import { onMount, afterUpdate } from "svelte"
+	import { page } from "$app/stores"
+	import { fly } from "svelte/transition"
 
-	function Dslika() {
-		let reader = new FileReader()
-		let file = slika.files[0]
+	let socket: any
+	let username: string | null
 
-		reader.onload = () => {
-			let blob = new Blob([reader.result, { type: file.type }])
-			imageurl = URL.createObjectURL(blob)
-		}
+	let messages: any[] = []
+	let pinned: string = ""
+	let connected: string = ""
 
-		reader.readAsArrayBuffer(file)
+	async function getProfile(user: string) {
+		const res = await fetch("https://kick.com/api/v2/channels/" + user)
+		const data = await res.json()
+
+		const { profile_pic } = data.user
+
+		return profile_pic
 	}
 
-	export let data
+	async function startSocket() {
+		socket = new WebSocket(
+			"wss://ws-us2.pusher.com/app/eb1d5f283081a78b932c?protocol=7&client=js&version=7.6.0&flash=false"
+		)
 
-	$: ({ web_code } = data)
+		socket.onmessage = async (e: any) => {
+			let msg = JSON.parse(e.data)
 
-	$: if (pregledaj) {
-		setTimeout(() => {
-			let frame = iframe.contentWindow?.document
+			let eventType = msg.event
 
-			if (frame) {
-				let random = Math.floor(Math.random() * 3) + 1
-
-				if (!naslov) {
-					naslov = "Ovo je moj video!"
-				}
-
-				if (!yt) {
-					yt = "Moj kanal"
-				}
-
-				frame.querySelector("#dialog.ytd-consent-bump-v2-lightbox").style.display = "none"
-				frame.querySelector("tp-yt-iron-overlay-backdrop.opened").style.display = "none"
-
-				let em = frame.querySelector("ytd-rich-item-renderer:nth-of-type(" + random + ")")
-
-				em.querySelector("yt-formatted-string a").innerHTML = yt
-				em.querySelector("#tooltip").innerHTML = yt
-				em.querySelector("#video-title").innerHTML = naslov
-				em.querySelector(".ytd-thumbnail span").innerHTML = " 69:69 "
-				em.querySelector(".ytd-thumbnail img").setAttribute("src", imageurl)
+			if (eventType == "pusher_internal:subscription_succeeded") {
+				connected = "1"
 			}
-		}, 1000)
+
+			if (eventType == "App\\Events\\ChatMessageEvent") {
+				let picture = await getProfile(JSON.parse(msg.data).sender.slug)
+
+				if (!picture) {
+					picture = "/user.png"
+				}
+
+				messages.push({
+					eventType: eventType,
+					message: JSON.parse(msg.data),
+					pfp: picture
+				})
+
+				messages = messages
+			}
+
+			if (eventType == "App\\Events\\MessageDeletedEvent") {
+				msg = JSON.parse(msg.data)
+
+				for (let i = 0; i < messages.length; i++) {
+					if (messages[i].message.id == msg.message.id) {
+						messages.splice(i, 1)
+						messages = messages
+						break
+					}
+				}
+			}
+
+			if (eventType == "App\\Events\\PinnedMessageCreatedEvent") {
+				msg = JSON.parse(msg.data)
+
+				pinned = msg.message.sender.username + ">" + msg.message.content
+			}
+
+			if (eventType == "App\\Events\\PinnedMessageDeletedEvent") {
+				pinned = ""
+			}
+		}
 	}
+
+	async function connect() {
+		messages = []
+		pinned = ""
+
+		connected = "0"
+
+		const res = await fetch("https://kick.com/api/v2/channels/" + username)
+
+		const data = await res.json()
+
+		const { id } = data.chatroom
+
+		socket.send(
+			JSON.stringify({
+				event: "pusher:subscribe",
+				data: {
+					auth: "",
+					channel: "chatrooms." + id + ".v2"
+				}
+			})
+		)
+	}
+
+	async function disconnect() {
+		socket.close()
+
+		messages = []
+		pinned = ""
+		connected = ""
+
+		startSocket()
+	}
+
+	onMount(async () => {
+		startSocket()
+
+		username = $page.url.searchParams.get("username")
+
+		socket.onopen = () => {
+			if (username) {
+				connect()
+			}
+		}
+	})
+
+	afterUpdate(() => {
+		document.documentElement.scrollTop = document.documentElement.scrollHeight
+	})
+
+	let proba: number
 </script>
 
-<!-- svelte-ignore a11y-missing-attribute -->
-<iframe srcdoc={web_code} bind:this={iframe} style:display={pregledaj ? "block" : "none"} />
+<svelte:window bind:outerWidth={proba} />
 
-{#if !pregledaj}
-	<form>
-		<label>Odaberi sliku:</label>
-		<input type="file" on:change={Dslika} bind:this={slika} />
-		{#if imageurl}
-			<img src={imageurl} alt="Thumbnail" />
-		{/if}
-		<label>Naslov videja:</label>
-		<input type="text" bind:value={naslov} />
-		<label>Ime kanala:</label>
-		<input type="text" bind:value={yt} />
-		<button
-			on:click={() => {
-				pregledaj = !pregledaj
-			}}>Pregledaj</button
-		>
-	</form>
+<input type="text" bind:value={username} />
+
+<button on:click={connect}>Connect</button>
+<button on:click={disconnect}>Disconnect</button>
+
+{#if connected == "0"}
+	<h1>Connecting...</h1>
 {:else}
-	<button
-		on:click={() => {
-			location.reload()
-		}}>Opet?</button
-	>
+	<h1>{pinned}</h1>
+	<div class="messages">
+		{#each messages as message}
+			<div class="message" transition:fly={{ x: -300 }}>
+				<img src={message.pfp} alt="Profile" />
+				{#if message.message.sender.identity.badges[0]}
+					<span class="badge">
+						[{message.message.sender.identity.badges[0].text}]
+					</span>
+				{/if}
+				<div class="sender">
+					<span style:color={message.message.sender.identity.color}>
+						{message.message.sender.username}
+					</span>
+				</div>
+				<div class="msg">
+					{message.message.content}
+				</div>
+			</div>
+		{/each}
+	</div>
 {/if}
 
-<style>
-	iframe {
-		display: block;
-		margin: 0px auto;
-		width: 80%;
-		height: 80vh;
-	}
-
-	label {
-		display: block;
-		margin: 10px 0px;
-	}
-
-	img {
-		display: block;
-		max-width: 300px;
-		margin: 10px 0px;
-	}
-</style>
+<p>Window width: {proba}</p>
